@@ -7,7 +7,8 @@ const out = await Bun.build({
   target: "bun",
   format: "esm",
   minify: false,
-  external: ["@opencode-ai/plugin"],
+  // The host owns these modules (including Effect's runtime identity). Never bundle copies.
+  external: ["@opencode/*", "effect", "effect/*"],
 })
 
 if (!out.success) {

@@ -1,7 +1,7 @@
 {
   "name": "opencode-config-d",
   "version": "0.1.0",
-  "description": "opencode plugin for loading config overlays from config.d",
+  "description": "Native OpenCode V2 plugin for scoped config.d defaults",
   "type": "module",
   "main": "src/index.ts",
   "exports": {
@@ -15,7 +15,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "bundle": "bun run bundle.ts",
     "prepublishOnly": "bun run bundle"
   },
@@ -23,16 +23,20 @@
     "bun": ">=1.0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "*"
+    "@opencode/plugin": "2.0.32",
+    "@opencode/schema": "2.0.32",
+    "effect": "4.0.1"
   },
   "dependencies": {
-    "jsonc-parser": "3.3.1"
+    "jsonc-parser": "3.3.1",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.15.0",
+    "@opencode/plugin": "2.0.32",
+    "@opencode/schema": "2.0.32",
+    "effect": "4.0.1",
     "@types/bun": "1.3.14",
     "@types/node": "25.8.0",
-    "bun": "1.3.14",
     "typescript": "6.0.3"
   }
 }

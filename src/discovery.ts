@@ -5,7 +5,7 @@ import path from "node:path"
 import type { Config } from "@opencode/schema/config"
 import { parse as parseJSONC, type ParseError } from "jsonc-parser"
 import { parse as parseYAML } from "yaml"
-import { agentMarkdownDocument, decodeConfig, isRecord, mergeConfigValues, normalizeSupportedDocument, type Document, type Rule } from "./normalize"
+import { agentMarkdownDocument, decodeConfig, isRecord, mergeConfigValues, normalizeSupportedDocument, normalizeSupportedInput, type Document, type Rule } from "./normalize"
 
 /** Fragment values are merged in lexical filename order, independently of the global base config. */
 export interface FragmentBundle { readonly config: Config.Info; readonly files: readonly string[] }
@@ -61,7 +61,7 @@ export async function parseConfigDocument(text: string, source: string, baseDire
   return substitute(parsed)
 }
 
-/** Load regular .json/.jsonc files (including uppercase extensions) in stable lexical order. */
+/** Normalize regular JSON/JSONC fragments in lexical order, then strictly validate the complete merge. */
 export async function loadFragments(globalDirectory: string,
   environment: Readonly<Record<string, string | undefined>> = process.env): Promise<FragmentBundle> {
   const directory = path.join(globalDirectory, "config.d")
@@ -76,9 +76,9 @@ export async function loadFragments(globalDirectory: string,
   let merged: unknown = {}
   for (const file of files) {
     const raw = await parseConfigDocument(await readFile(file, "utf8"), file, directory, environment)
-    merged = mergeConfigValues(merged, normalizeSupportedDocument(raw, file, true).config)
+    merged = mergeConfigValues(merged, normalizeSupportedInput(raw, file, true).config)
   }
-  return { config: decodeConfig(merged), files }
+  return { config: decodeConfig(merged, directory, true), files }
 }
 
 /** Canonicalize symlinks to avoid treating global configuration as project declarations. */

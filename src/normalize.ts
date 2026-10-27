@@ -5,9 +5,9 @@ import { Schema } from "effect"
 export type RecordValue = Record<string, unknown>
 export type Rule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
 
-/** A decoded document and declarations that cannot be represented by Config.Info alone. */
-export interface Document {
-  readonly config: Config.Info
+/** Normalized values (raw until merged, or decoded) plus declarations outside Config.Info. */
+export interface Document<T = Config.Info> {
+  readonly config: T
   readonly policies: readonly Rule[]
   readonly mcpActivation: readonly (readonly [string, boolean])[]
 }
@@ -89,8 +89,10 @@ function legacyAgent(value: unknown): RecordValue {
 
 /** Select native Markdown frontmatter using native field names, preserving the body as system text. */
 export function agentMarkdownDocument(frontmatter: RecordValue, body: string, id: string, primary: boolean): unknown {
-  const native = Object.keys(frontmatter).every((key) => NATIVE_AGENT.has(key))
-  const agent = native ? { ...frontmatter } : legacyAgent(frontmatter)
+  // Any V2-only marker selects the whole file's format; legacy fields must then be ignored.
+  const native = ["permissions", "request", "system", "disabled"].some((key) => key in frontmatter) ||
+    Object.keys(frontmatter).every((key) => NATIVE_AGENT.has(key))
+  const agent = native ? Object.fromEntries(Object.entries(frontmatter).filter(([key]) => NATIVE_AGENT.has(key))) : legacyAgent(frontmatter)
   agent.system = body.trim()
   if (primary) agent.mode = "primary"
   return { agents: { [id]: agent } }
@@ -220,8 +222,8 @@ function policies(raw: RecordValue): Rule[] {
   return rules
 }
 
-/** Normalize only public transform domains; unsupported fragment roots must never silently disappear. */
-export function normalizeSupportedDocument(raw: unknown, source: string, fragment = false): Document {
+/** Normalize aliases before merging, allowing partial fragments without dropping unsupported roots. */
+export function normalizeSupportedInput(raw: unknown, source: string, fragment = false): Document<RecordValue> {
   if (!isRecord(raw)) throw new Error(`Invalid config document ${source}: root must be an object`)
   if (fragment) {
     const supported = new Set(["$schema", "agent", "agents", "provider", "providers", "mcp"])
@@ -245,7 +247,13 @@ export function normalizeSupportedDocument(raw: unknown, source: string, fragmen
   const permissions = raw.permissions ?? legacyPermissions(raw.permission, raw.tools)
   const candidate = { ...(agents !== undefined ? { agents } : {}), ...(providers !== undefined ? { providers } : {}),
     ...(mcp.config ? { mcp: mcp.config } : {}), ...(Array.isArray(permissions) && permissions.length ? { permissions } : {}) }
-  return { config: decodeConfig(candidate, source, fragment), policies: policies(raw), mcpActivation: mcp.activation }
+  return { config: candidate, policies: policies(raw), mcpActivation: mcp.activation }
+}
+
+/** Decode complete documents; fragment callers instead validate their fully merged normalized inputs. */
+export function normalizeSupportedDocument(raw: unknown, source: string, fragment = false): Document {
+  const document = normalizeSupportedInput(raw, source, fragment)
+  return { ...document, config: decodeConfig(document.config, source, fragment) }
 }
 
 /** Map named configuration entries while rejecting malformed maps before schema decoding. */

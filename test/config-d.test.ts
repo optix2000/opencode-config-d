@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import { Agent, Model, Plugin, Provider, type Mcp } from "@opencode/plugin"
 import { Schema } from "effect"
-import ConfigDPlugin, { discoverProjectConfig, loadFragments, normalizeSupportedDocument, parseAgentMarkdown, parseConfigDocument } from "../src/index"
+import ConfigDPlugin, { applyAgentDefaults, discoverProjectConfig, loadFragments, normalizeSupportedDocument, parseAgentMarkdown, parseConfigDocument } from "../src/index"
 import { projectDenies } from "../src/discovery"
 
 const temporary: string[] = []
@@ -137,6 +137,62 @@ test("merges lexical JSON/JSONC fragments and replaces arrays through native age
   expect(h.registrations()).toBe(0)
 })
 
+test.each(["native", "legacy"])("partial native MCP overlays merge with a %s base before validation", async (format) => {
+  const f = await fixture()
+  const server = { type: "remote" as const, url: "https://example.com", headers: { "x-base": "retained" } }
+  await f.fragment("10-base.json", { mcp: format === "native" ? { servers: { docs: server } } : { docs: server } })
+  await f.fragment("20-auth.json", { mcp: { servers: { docs: { headers: { Authorization: "Bearer test" } } } } })
+  const h = host(f.project, f.global)
+  await ConfigDPlugin.setup(h.context)
+  expect(h.state().mcp.get("docs")).toEqual({ ...server, headers: { "x-base": "retained", Authorization: "Bearer test" } })
+})
+
+test("partial native model selections and costs can span fragment files", async () => {
+  const f = await fixture()
+  await f.fragment("10-base.json", { agents: { build: { model: { providerID: "custom" } } },
+    providers: { custom: { models: { test: { cost: { input: 1 } } } } } })
+  await f.fragment("20-overlay.json", { agents: { build: { model: { model: "test" } } },
+    providers: { custom: { models: { test: { cost: { output: 2 } } } } } })
+  const h = host(f.project, f.global)
+  await ConfigDPlugin.setup(h.context)
+  expect(h.state().agents.get("build")?.model).toEqual(Model.Ref.parse("custom/test"))
+  expect(h.state().models.get("custom/test")?.cost).toMatchObject([{ input: 1, output: 2, cache: { read: 0, write: 0 } }])
+})
+
+test("fragment aliases retain lexical precedence across native and legacy documents", async () => {
+  const f = await fixture()
+  await f.fragment("10-native.json", { agents: { build: { description: "native" } }, providers: { custom: { name: "native" } } })
+  await f.fragment("20-legacy.json", { agent: { build: { description: "legacy" } }, provider: { custom: { name: "legacy" } } })
+  const fragments = await loadFragments(f.global)
+  expect(fragments.config.agents?.build?.description).toBe("legacy")
+  expect(fragments.config.providers?.custom?.name).toBe("legacy")
+})
+
+test("MCP type changes discard the old union before merging later partial fragments", async () => {
+  const f = await fixture()
+  await f.fragment("10-remote.json", { mcp: { servers: { docs: { type: "remote", url: "https://example.com", headers: { "x-old": "removed" } } } } })
+  await f.fragment("20-local.json", { mcp: { servers: { docs: { type: "local" } } } })
+  await f.fragment("30-command.json", { mcp: { servers: { docs: { command: ["example-server"] } } } })
+  expect((await loadFragments(f.global)).config.mcp?.servers?.docs).toEqual({ type: "local", command: ["example-server"] })
+})
+
+test.each([false, true])("merged fragment validation rejects incomplete or unknown MCP fields (unknown=%s) without leaking secrets", async (unknown) => {
+  const f = await fixture()
+  const secret = "DO-NOT-LOG-MERGED-CREDENTIAL"
+  await f.fragment("10-invalid.json", { mcp: { servers: { docs: unknown
+    ? { type: "remote", url: "https://example.com", typo: secret }
+    : { headers: { Authorization: secret } } } } })
+  const h = host(f.project, f.global)
+  try {
+    await ConfigDPlugin.setup(h.context)
+    throw new Error("Expected merged validation to fail")
+  } catch (error) {
+    expect(String(error)).toContain("Invalid supported config schema")
+    expect(String(error)).not.toContain(secret)
+  }
+  expect(h.registrations()).toBe(0)
+})
+
 test("expands legacy provider env/file placeholders without exposing secrets", async () => {
   const f = await fixture()
   process.env.CONFIG_D_TEST_VALUE = 'quote" backslash\\ newline\n {file:never-read}'
@@ -232,6 +288,28 @@ test("native agent Markdown protects model, disabled, request and permission dec
   expect(snapshot.config.agents?.explore).toMatchObject({ model: { providerID: "openai", model: "test", variant: "high" }, disabled: false, system: "Native system", request: { body: { temperature: 0.2 } } })
   expect(snapshot.agentPermissions.get("explore")).toEqual([{ action: "edit", resource: "*", effect: "deny" }])
   expect(snapshot.config.agents?.explore?.request?.body).not.toHaveProperty("permissions")
+})
+
+test.each(["disabled: false", "request:\n  headers:\n    x-native: retained", "permissions: []", "system: frontmatter"])("native Markdown selected by %s ignores legacy fields", (native) => {
+  const raw = parseAgentMarkdown(`---\n${native}\nmodel: openai/test\nvariant: legacy\npermission:\n  edit: allow\ntools:\n  shell: true\ntemperature: 0.9\nunknown_legacy_option: true\n---\nNative body`, "build", "build.md")
+  const agent = normalizeSupportedDocument(raw, "build.md").config.agents?.build
+  expect(agent?.model).toEqual({ providerID: Provider.ID.make("openai"), model: Model.ID.make("test") })
+  expect(agent?.system).toBe("Native body")
+  expect(agent?.permissions ?? []).toEqual([])
+  expect(agent?.request?.body).toBeUndefined()
+  if (native.startsWith("request:")) expect(agent?.request?.headers).toEqual({ "x-native": "retained" })
+})
+
+test("mixed native Markdown cannot replay ignored legacy allows after project denies", async () => {
+  const f = await fixture()
+  const deny = { action: "edit", resource: "*", effect: "deny" as const }
+  await f.config({ permissions: [deny] })
+  await f.config("---\ndisabled: false\npermission:\n  edit: allow\n---\nNative body", ".opencode/agents/build.md")
+  await f.fragment("10-permissions.json", { agents: { build: { permissions: [{ action: "*", resource: "*", effect: "allow" }] } } })
+  const h = host(f.project, f.global)
+  await ConfigDPlugin.setup(h.context)
+  expect(h.state().agents.get("build")?.permissions.at(-1)).toEqual(deny)
+  expect((await f.snapshot()).agentPermissions.get("build")).toEqual([])
 })
 
 test("legacy agent Markdown, modes and nested path-derived IDs remain supported", async () => {
@@ -402,6 +480,38 @@ test("explicit empty provider and MCP maps are not repopulated by fragment defau
   await ConfigDPlugin.setup(h.context)
   expect(h.state().providers.size).toBe(0)
   expect(h.state().mcp.size).toBe(0)
+})
+
+test.each([
+  { agents: {}, disabled: false }, { agents: { build: {} }, disabled: false },
+  { agents: {}, disabled: true }, { agents: { build: {} }, disabled: true },
+])("empty project agent objects block all fragment edits (%j)", async ({ agents, disabled }) => {
+  const f = await fixture()
+  await f.config({ agents })
+  await f.fragment("10-agent.json", { agents: { build: { disabled, model: "custom/test", description: "fragment", request: { body: { injected: true } },
+    permissions: [{ action: "edit", resource: "*", effect: "allow" }] } } })
+  const agent: Mutable<Agent.Info> = Agent.Info.default(Agent.ID.make("build"))
+  agent.permissions.push({ action: "edit", resource: "*", effect: "deny" })
+  const draft = structuredClone(agent)
+  applyAgentDefaults(draft, (await loadFragments(f.global)).config.agents!.build!, await f.snapshot())
+  expect(draft).toEqual(agent)
+  const h = host(f.project, f.global, { agents: [agent] })
+  const cleanup = await ConfigDPlugin.setup(h.context)
+  const transformed = h.state().agents.get("build")
+  expect(transformed).toEqual(agent)
+  expect(h.state().agents.get("build")).toEqual(transformed)
+  await cleanup?.()
+  expect(h.registrations()).toBe(0)
+})
+
+test("an empty project agents map also protects against unknown fragment agents", async () => {
+  const f = await fixture()
+  await f.config({ agents: {} })
+  await f.fragment("10-agent.json", { agents: { unknown: { system: "must not load" } } })
+  const h = host(f.project, f.global)
+  const baseline = h.state().agents
+  await ConfigDPlugin.setup(h.context)
+  expect(h.state().agents).toEqual(baseline)
 })
 
 test("empty project maps protect subtrees and MCP integration policies prohibit additions", async () => {

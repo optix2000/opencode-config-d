@@ -75,6 +75,7 @@ export function buildProvider(providerID: string, fragment: ProviderConfig, proj
 /** Apply agent defaults while replaying all ordered project permission rules after fragment rules. */
 export function applyAgentDefaults(agent: AgentDraft, fragment: NonNullable<Config.Info["agents"]>[string], project: ProjectSnapshot): void {
   const prefix = `agents.${agent.id}`
+  if (protectedSubtree(project, prefix)) return
   if (fragment.model && !declared(project, `${prefix}.model`)) {
     const { providerID, model, variant } = fragment.model
     if (!projectDenies(project, "provider.use", providerID) && !project.config.providers?.[providerID]?.models?.[model]?.disabled) {
@@ -147,7 +148,7 @@ function transformMCP(editor: Parameters<Parameters<Plugin.Context["mcp"]["trans
 /** Register replayable domain edits and clean up successful registrations if a later setup step fails. */
 async function registerTransforms(ctx: Plugin.Context, fragments: Config.Info, project: ProjectSnapshot): Promise<() => Promise<void>> {
   // Validate unsupported inputs outside callbacks: some hosts log transform exceptions instead of rejecting setup.
-  const agentIDs = Object.keys(fragments.agents ?? {})
+  const agentIDs = Object.keys(fragments.agents ?? {}).filter((id) => !protectedSubtree(project, `agents.${id}`))
   if (agentIDs.length) {
     const loaded = new Set((await ctx.agent.list()).data.map((agent) => agent.id))
     for (const id of agentIDs) if (!loaded.has(id) && !project.config.agents?.[id]?.disabled) {
@@ -160,7 +161,7 @@ async function registerTransforms(ctx: Plugin.Context, fragments: Config.Info, p
   try {
     registrations.push(await ctx.agent.transform((editor) => {
       for (const [id, fragment] of Object.entries(fragments.agents ?? {})) {
-        if (project.config.agents?.[id]?.disabled) continue
+        if (project.config.agents?.[id]?.disabled || protectedSubtree(project, `agents.${id}`)) continue
         const agent = editor.get(id)
         // A later reload may remove an originally loaded agent. Never recreate it.
         if (!agent) continue

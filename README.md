@@ -21,6 +21,8 @@ Alternatively, configure a local checkout with `"plugins": ["./plugins/opencode-
 
 The plugin loads regular `*.json` and `*.jsonc` files from `$XDG_CONFIG_HOME/opencode/config.d`, falling back to `~/.config/opencode/config.d`. Extensions are case-insensitive. No separate global `opencode.json(c)` base file is required. Files are sorted lexically by filename; later files override earlier ones. Objects merge deeply, arrays replace, and a changed MCP `type` replaces the complete union member.
 
+Each fragment's aliases are normalized before merging; schema validation runs on the complete result. Native entries may therefore span files: for example, define an MCP server's `type` and `url` in one file and add its `headers` in a later file. The merged configuration must be complete and valid, and unsupported fragment roots still fail immediately.
+
 ```jsonc
 // config.d/10-explore.jsonc
 {
@@ -72,9 +74,11 @@ Supported local V1 fragments also work: `agent`, `provider`, legacy MCP maps, pr
 
 ## Project precedence and safety
 
-The plugin registers synchronous `agent`, `provider`, `model`, and `mcp` transforms after loading its files once. It reconstructs explicit project declarations separately, rather than guessing provenance by comparing current values with fragment values. A project declaration wins even when its value equals a fragment's value. Explicit empty objects protect their subtree.
+The plugin registers synchronous `agent`, `provider`, `model`, and `mcp` transforms after loading its files once. It reconstructs explicit project declarations separately, rather than guessing provenance by comparing current values with fragment values. A project declaration wins even when its value equals a fragment's value. Explicit empty objects protect their subtree, including agent permissions and disabled state.
 
 Discovery follows released V2 ordering: `OPENCODE_CONFIG`, direct ancestor `opencode.json(c)` files from filesystem root to the active directory, ancestor `.opencode` configs and agent Markdown definitions, then `OPENCODE_CONFIG_CONTENT`. It honors `OPENCODE_DISABLE_PROJECT_CONFIG` and excludes the global config directory. Native Markdown `model`, `request`, `disabled`, `permissions`, and the body-as-`system` are preserved; legacy agent/mode files remain supported.
+
+Markdown frontmatter containing any of `permissions`, `request`, `system`, or `disabled` selects the native V2 format for the whole file. Legacy fields such as `permission`, `tools`, and `variant` in that file are ignored, matching OpenCode's behavior.
 
 - Ordered project tool permissions are replayed **after** fragment agent permissions. Rules from earlier project documents are retained, not accidentally replaced by later permission arrays; top-level rules precede agent-specific rules, as in native configuration. A fragment allow cannot erase an applicable project deny.
 - Ordered provider/integration policies support native `policies`, legacy `experimental.policies`, and V1 provider filters. Broader project policy sources outrank narrower ones, with last-match-wins wildcard rules within each document. OpenCode remains responsible for enforcing global/system/Console policies.
@@ -82,7 +86,7 @@ Discovery follows released V2 ordering: `OPENCODE_CONFIG`, direct ancestor `open
 
 ## Deliberate V2 limits
 
-V2 has **no global config hook**. Fragments therefore accept only `agents`, `providers`, `mcp.servers`, the supported local V1 aliases, and optional `$schema` metadata. Unsupported roots fail startup rather than silently doing nothing. In particular, put top-level `model`, `permissions`, `policies`, `plugins`, commands, skills and other general settings in native `opencode.json(c)`. Use agent-specific permissions in fragments. `mcp.timeout` defaults and enabled-only fragment MCP declarations are unsupported; provide a complete server configuration.
+V2 has **no global config hook**. Fragments therefore accept only `agents`, `providers`, `mcp.servers`, the supported local V1 aliases, and optional `$schema` metadata. Unsupported roots fail startup rather than silently doing nothing. In particular, put top-level `model`, `permissions`, `policies`, `plugins`, commands, skills and other general settings in native `opencode.json(c)`. Use agent-specific permissions in fragments. `mcp.timeout` defaults and standalone enabled-only fragment MCP declarations are unsupported; the merged fragments must provide a complete server configuration. Legacy MCP entries still require a `type` in each fragment; use native `mcp.servers` for partial overlays.
 
 - **New agents cannot be created through the public agent editor.** Fragments may customize already-loaded built-in, project or other-plugin agents; unknown IDs fail clearly. Declare custom agents in native config or `.opencode/agents/` first. Plugin order matters for agents supplied by another plugin.
 - Native model `capabilities.reasoning` requires OpenCode's internal variant-lowering adapter, not exposed by the public model editor. Use explicit `variants` in fragments, or configure reasoning capabilities in native `providers`. Unsupported fragment lowering fails explicitly.
